@@ -28,7 +28,11 @@ import time
 # =============================
 # CONFIG
 # =============================
-DATA_PATH = "data/supply_chain_data.csv"
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent
+DATA_PATH = BASE_DIR / "data" / "supply_chain_data.csv"
+
 st.set_page_config(page_title="Supply Chain & Logistics BI Dashboard", layout="wide")
 
 
@@ -1283,3 +1287,4 @@ else:
 
 st.markdown("<hr>", unsafe_allow_html=True)
 st.caption("© Supply Chain BI Dashboard — Streamlit | Fokus: keputusan (alert, action plan, savings). Built by Kafabih")
+
