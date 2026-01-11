@@ -23,19 +23,20 @@ import streamlit.components.v1 as components
 import os
 import time
 
-
-
 # =============================
 # CONFIG
 # =============================
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
+
+# ✅ FIX 1: samakan nama file dengan yang ada di repo kamu: data/supply_chain_data.csv
 DATA_PATH = BASE_DIR / "data" / "supply_chain_data.csv"
 
+# ✅ FIX 2: path cache geocode yang sudah kamu punya
+GEOCODE_CACHE_PATH = BASE_DIR / "data" / "geocode_cache.csv"
+
 st.set_page_config(page_title="Supply Chain & Logistics BI Dashboard", layout="wide")
-
-
 
 
 # =============================
@@ -119,13 +120,16 @@ def style_status_df(df_in: pd.DataFrame, status_col: str = "status") -> "pd.io.f
 # =============================
 # 1) ETL + 2) DATA CLEANING
 # =============================
+
 @st.cache_data(show_spinner=False)
 def geocode_locations_to_df(locations: list[str], cache_path: str = "data/geocode_cache.csv") -> pd.DataFrame:
     """
-    Mengubah list 'location' (nama kota/negara) menjadi lat/lon via Nominatim (OpenStreetMap).
-    Hasil disimpan ke CSV cache supaya tidak geocode ulang.
+    ✅ FIX: OFFLINE ONLY
+    Fungsi ini tidak lagi geocode online (tidak pakai geopy).
+    Dia hanya baca file cache: data/geocode_cache.csv
+    Format wajib cache: location, lat, lon
     """
-    # Bersihin dan unik
+    # Lokasi yang diminta (dibersihkan + unik)
     locs = [str(x).strip() for x in locations if str(x).strip() and str(x).strip().lower() != "nan"]
     locs = sorted(list(dict.fromkeys(locs)))
 
@@ -134,50 +138,27 @@ def geocode_locations_to_df(locations: list[str], cache_path: str = "data/geocod
     if os.path.exists(cache_path):
         try:
             cache = pd.read_csv(cache_path)
-            cache["location"] = cache["location"].astype(str).str.strip()
+            cache.columns = [c.strip().lower() for c in cache.columns]
+            if not {"location", "lat", "lon"}.issubset(set(cache.columns)):
+                cache = pd.DataFrame(columns=["location", "lat", "lon"])
+            else:
+                cache["location"] = cache["location"].astype(str).str.strip()
+                cache["lat"] = pd.to_numeric(cache["lat"], errors="coerce")
+                cache["lon"] = pd.to_numeric(cache["lon"], errors="coerce")
+                cache = cache.drop_duplicates("location", keep="last")
         except Exception:
             cache = pd.DataFrame(columns=["location", "lat", "lon"])
 
-    cached_set = set(cache["location"].astype(str).tolist())
-    to_fetch = [l for l in locs if l not in cached_set]
+    # Pastikan output minimal berisi baris untuk location yang diminta
+    if len(locs) == 0:
+        return cache
 
-    # Kalau semua sudah ada di cache
-    if len(to_fetch) == 0:
-        return cache.drop_duplicates("location", keep="last")
-
-    # Geocode (butuh internet)
-    try:
-        from geopy.geocoders import Nominatim
-        geolocator = Nominatim(user_agent="streamlit_supply_chain_dashboard")
-    except Exception:
-        # geopy belum terinstall
-        return cache.drop_duplicates("location", keep="last")
-
-    new_rows = []
-    for i, loc in enumerate(to_fetch, start=1):
-        try:
-            g = geolocator.geocode(loc, timeout=10)
-            if g is not None:
-                new_rows.append({"location": loc, "lat": float(g.latitude), "lon": float(g.longitude)})
-            else:
-                new_rows.append({"location": loc, "lat": np.nan, "lon": np.nan})
-        except Exception:
-            new_rows.append({"location": loc, "lat": np.nan, "lon": np.nan})
-
-        # Rate limiting halus (biar nggak diblok)
-        time.sleep(1.0)
-
-    new_df = pd.DataFrame(new_rows)
-    out = pd.concat([cache, new_df], ignore_index=True).drop_duplicates("location", keep="last")
-
-    # Simpan cache
-    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-    try:
-        out.to_csv(cache_path, index=False)
-    except Exception:
-        pass
+    # Join cache dengan daftar lokasi yang diminta
+    req = pd.DataFrame({"location": locs})
+    out = req.merge(cache, on="location", how="left")
 
     return out
+
 
 @st.cache_data
 def load_and_clean_data(csv_path: str) -> pd.DataFrame:
@@ -1183,7 +1164,7 @@ with tab5:
         - **Clustering:** k-means + hierarchical (Agglomerative).
         - **Time series:** ARIMA + trend regression.
         - **Visualization:** Plotly interaktif + matplotlib statik.
-        - **Geo mapping:** Folium (Leaflet) ditampilkan di Streamlit.
+        - **Geo mapping:** Plotly Geo di Streamlit (offline via cache).
         
         **Catatan:** Dashboard web dikembangkan dengan **Streamlit** (bukan Dash/Shiny).
         """
@@ -1203,92 +1184,95 @@ with tab5:
     st.write("Outlier count (IQR rule):")
     st.dataframe(rep["outlier_counts_iqr"].head(15), use_container_width=True)
 
+    # ✅ FIX 3: blok geo-mapping harus tetap di dalam tab5 (indent benar)
     st.markdown("### 7c) Geo-mapping (sesuai dataset) — Plotly Geo")
-st.caption("Pakai koordinat asli bila ada. Jika tidak ada, sistem akan geocode 'location' → lat/lon (dicache).")
+    st.caption("Pakai koordinat dari geocode_cache.csv (offline). Tidak geocode online.")
 
-# agregasi per location
-loc_agg = (
-    d.groupby("location", as_index=False)
-    .agg(
-        shipments=("sku", "count"),
-        avg_logistics_cost=("logistics_cost", "mean"),
-        total_logistics_cost=("logistics_cost", "sum"),
-        on_time_rate=("on_time_flag", "mean"),
-        stockout_rate=("stockout_flag", "mean"),
-    )
-    .sort_values("total_logistics_cost", ascending=False)
-)
-
-# CASE A: dataset punya lat/lon langsung
-if ("latitude" in d.columns) and ("longitude" in d.columns):
-    pts = (
-        d[["latitude", "longitude", "location", "logistics_cost", "on_time_flag", "stockout_flag"]]
-        .dropna(subset=["latitude", "longitude"])
-        .copy()
-    )
-    pts["latitude"] = pd.to_numeric(pts["latitude"], errors="coerce")
-    pts["longitude"] = pd.to_numeric(pts["longitude"], errors="coerce")
-    pts = pts.dropna(subset=["latitude", "longitude"])
-
-    fig_map = px.scatter_geo(
-        pts,
-        lat="latitude",
-        lon="longitude",
-        color="logistics_cost",
-        hover_name="location",
-        hover_data=["on_time_flag", "stockout_flag"],
-        title="Shipment Points (raw) — berdasarkan latitude/longitude dataset",
-    )
-    fig_map.update_layout(margin=dict(l=0, r=0, t=40, b=0))
-    st.plotly_chart(fig_map, use_container_width=True)
-
-# CASE B: tidak ada lat/lon → geocode dari 'location'
-else:
-    # Batasi geocode kalau lokasi terlalu banyak (biar nggak lama & rate limit)
-    max_geo = 40
-    loc_for_geo = loc_agg.head(max_geo)["location"].astype(str).tolist()
-
-    geo_df = geocode_locations_to_df(loc_for_geo, cache_path="data/geocode_cache.csv")
-    loc_plot = loc_agg.merge(geo_df, on="location", how="left")
-
-    ok = loc_plot.dropna(subset=["lat", "lon"]).copy()
-    miss = int(loc_plot["lat"].isna().sum())
-
-    if len(ok) == 0:
-        st.warning(
-            "Tidak ada lokasi yang berhasil di-geocode. "
-            "Solusi paling akurat: tambahkan kolom latitude/longitude di dataset."
+    # agregasi per location
+    loc_agg = (
+        d.groupby("location", as_index=False)
+        .agg(
+            shipments=("sku", "count"),
+            avg_logistics_cost=("logistics_cost", "mean"),
+            total_logistics_cost=("logistics_cost", "sum"),
+            on_time_rate=("on_time_flag", "mean"),
+            stockout_rate=("stockout_flag", "mean"),
         )
-    else:
-        if miss > 0:
-            st.info(f"{miss} location belum dapat koordinat (geocode gagal/ambigu). Map menampilkan yang berhasil saja.")
+        .sort_values("total_logistics_cost", ascending=False)
+    )
+
+    # CASE A: dataset punya lat/lon langsung
+    if ("latitude" in d.columns) and ("longitude" in d.columns):
+        pts = (
+            d[["latitude", "longitude", "location", "logistics_cost", "on_time_flag", "stockout_flag"]]
+            .dropna(subset=["latitude", "longitude"])
+            .copy()
+        )
+        pts["latitude"] = pd.to_numeric(pts["latitude"], errors="coerce")
+        pts["longitude"] = pd.to_numeric(pts["longitude"], errors="coerce")
+        pts = pts.dropna(subset=["latitude", "longitude"])
 
         fig_map = px.scatter_geo(
-            ok,
-            lat="lat",
-            lon="lon",
-            size="shipments",
-            color="avg_logistics_cost",
+            pts,
+            lat="latitude",
+            lon="longitude",
+            color="logistics_cost",
             hover_name="location",
-            hover_data={
-                "shipments": True,
-                "avg_logistics_cost": ":.2f",
-                "total_logistics_cost": ":.2f",
-                "on_time_rate": ":.2f",
-                "stockout_rate": ":.2f",
-                "lat": False,
-                "lon": False,
-            },
-            title="Geo Map by Location — hasil geocoding 'location' (cached)",
+            hover_data=["on_time_flag", "stockout_flag"],
+            title="Shipment Points (raw) — berdasarkan latitude/longitude dataset",
         )
         fig_map.update_layout(margin=dict(l=0, r=0, t=40, b=0))
         st.plotly_chart(fig_map, use_container_width=True)
 
-    st.caption("Cache koordinat tersimpan di: data/geocode_cache.csv (biar run berikutnya cepat).")
+    # CASE B: tidak ada lat/lon → ambil dari cache (offline)
+    else:
+        # ambil semua location yang ada (atau bisa dibatasi)
+        loc_for_geo = loc_agg["location"].astype(str).str.strip().tolist()
+
+        # pakai cache yang sudah ada (offline)
+        geo_df = geocode_locations_to_df(loc_for_geo, cache_path=str(GEOCODE_CACHE_PATH))
+        geo_df["location"] = geo_df["location"].astype(str).str.strip()
+
+        loc_plot = loc_agg.copy()
+        loc_plot["location"] = loc_plot["location"].astype(str).str.strip()
+        loc_plot = loc_plot.merge(geo_df, on="location", how="left")
+
+        ok = loc_plot.dropna(subset=["lat", "lon"]).copy()
+        miss = int(loc_plot["lat"].isna().sum())
+
+        if len(ok) == 0:
+            st.warning(
+                "Tidak ada lokasi yang match dengan geocode_cache.csv. "
+                "Solusi: samakan penulisan nama kota (spasi/kapital) antara dataset dan cache."
+            )
+            st.dataframe(loc_plot[["location", "shipments"]].head(50), use_container_width=True)
+        else:
+            if miss > 0:
+                st.info(f"{miss} location belum ada koordinat di cache. Map menampilkan yang berhasil saja.")
+
+            fig_map = px.scatter_geo(
+                ok,
+                lat="lat",
+                lon="lon",
+                size="shipments",
+                color="avg_logistics_cost",
+                hover_name="location",
+                hover_data={
+                    "shipments": True,
+                    "avg_logistics_cost": ":.2f",
+                    "total_logistics_cost": ":.2f",
+                    "on_time_rate": ":.2f",
+                    "stockout_rate": ":.2f",
+                    "lat": False,
+                    "lon": False,
+                },
+                title="Geo Map by Location — dari geocode_cache.csv (offline)",
+            )
+            fig_map.update_layout(margin=dict(l=0, r=0, t=40, b=0))
+            st.plotly_chart(fig_map, use_container_width=True)
+
+        st.caption(f"Cache koordinat tersimpan di: {GEOCODE_CACHE_PATH}")
 
 
 st.markdown("<hr>", unsafe_allow_html=True)
 st.caption("© Supply Chain BI Dashboard — Streamlit | Fokus: keputusan (alert, action plan, savings). Built by Kafabih")
-
-
-
