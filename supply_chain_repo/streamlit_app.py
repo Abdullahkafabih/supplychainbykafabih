@@ -35,6 +35,10 @@ DATA_PATH = BASE_DIR / "data" / "supply_chain_data.csv"
 
 st.set_page_config(page_title="Supply Chain & Logistics BI Dashboard", layout="wide")
 
+latlon = pd.read_csv("data/geocode_chace.csv")
+df = df.merge(latlon, on="Location", how="left")
+
+
 
 # =============================
 # STYLE (CSS)
@@ -1287,4 +1291,5 @@ else:
 
 st.markdown("<hr>", unsafe_allow_html=True)
 st.caption("© Supply Chain BI Dashboard — Streamlit | Fokus: keputusan (alert, action plan, savings). Built by Kafabih")
+
 
